@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Linea Italia</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Titillium+Web:wght@400;600;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-tema="chiaro">
+<div id="map"></div>
+
+<header id="topbar">
+  <button id="btnCity" class="brand" title="Cambia città">
+    <span class="logo"><i></i><i></i><i></i></span>
+    <span><b>Linea Italia</b><small id="cityLbl">Scegli una città</small></span>
+  </button>
+  <div class="clock">
+    <div><b id="timeLbl">06:00</b> <small id="dayLbl">Giorno 1</small></div>
+    <small id="phaseLbl">—</small>
+  </div>
+  <div class="speeds" id="speeds">
+    <button data-speed="0" title="Pausa">❚❚</button>
+    <button data-speed="1">1×</button>
+    <button data-speed="10">10×</button>
+    <button data-speed="60">60×</button>
+    <button data-speed="300">300×</button>
+  </div>
+  <div class="kpis">
+    <div id="kCassaBox" style="display:none"><small>In cassa</small><b id="kCassa">—</b></div>
+    <div><small>Passeggeri/giorno</small><b id="kRiders">0</b></div>
+    <div><small>Copertura costi</small><b id="kRatio">—</b></div>
+    <div><small>Qualità</small><b id="kQual">—</b></div>
+  </div>
+</header>
+
+<aside id="panel">
+  <button id="panelToggle" class="grip" aria-label="Apri o chiudi il pannello"></button>
+  <nav class="tabs">
+    <button data-tab="costruisci" class="on">Costruisci</button>
+    <button data-tab="cantieri" style="display:none">Cantieri</button>
+    <button data-tab="tariffe">Tariffe</button>
+    <button data-tab="statistiche">Dati</button>
+    <button data-tab="sfide">Sfide</button>
+    <button data-tab="mappa">Mappa</button>
+  </nav>
+  <section id="tab-costruisci" class="tab on"></section>
+  <section id="tab-cantieri" class="tab"></section>
+  <section id="tab-tariffe" class="tab"></section>
+  <section id="tab-statistiche" class="tab"></section>
+  <section id="tab-sfide" class="tab"></section>
+  <section id="tab-mappa" class="tab"></section>
+</aside>
+
+<div id="cityModal" class="modal">
+  <div class="sheet">
+    <div class="hero">
+      <span class="logo big"><i></i><i></i><i></i></span>
+      <h1>Linea Italia</h1>
+      <p>Progetta la metropolitana delle città italiane, sulle mappe reali. Traccia le linee, decidi quanti treni far girare e convinci gli abitanti a lasciare a casa auto e scooter.</p>
+    </div>
+    <div class="search">
+      <input id="citySearch" type="search" placeholder="Cerca una città o un comune italiano…" autocomplete="off">
+      <button id="cityOnline">Cerca su OpenStreetMap</button>
+    </div>
+    <div id="cityList" class="citylist"></div>
+  </div>
+</div>
+
+<div id="loading" class="modal"><div class="sheet small"><div class="spinner"></div><p id="loadingTxt">Carico…</p></div></div>
+<div id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="cities.js"></script>
+<script src="sim.js"></script>
+<script src="game.js"></script>
+</body>
+</html>
