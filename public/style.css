@@ -220,3 +220,7 @@ body.notte .zonaLbl { background: rgba(20,22,26,.85); color: #c7a8ff; }
 /* prestiti */
 .prestito { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .prog.debito i { background: var(--good); }
+
+/* telefono: indicatori in alto su una riga sola */
+.kpis b { white-space: nowrap; }
+@media (max-width: 760px) { .kpis div { min-width: 0; } .kpis b { font-size: 15px; } }
