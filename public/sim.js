@@ -25,13 +25,25 @@ function distKm(a, b) {
 }
 
 // ---------- Dati OpenStreetMap: quartieri e poli di attrazione ----------
-const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+const OVERPASS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+];
 
 function raggioCitta(pop) { return Math.max(4, Math.min(17, 3 + Math.sqrt(pop / 1000) * 0.26)); }
 
 async function scaricaDatiOSM(city) {
   const key = 'lineaitalia:osm:v1:' + city.id;
   try { const c = localStorage.getItem(key); if (c) return JSON.parse(c); } catch (e) {}
+  // le città dell'elenco hanno i dati già inclusi nel sito (public/data)
+  if (!city.id.startsWith('osm-')) {
+    try {
+      const res = await fetch('data/' + city.id + '.json');
+      if (res.ok) { const d = await res.json(); if (d.places?.length) return d; }
+    } catch (e) { /* si passa ai server */ }
+  }
   const r = Math.round(raggioCitta(city.pop) * 1000);
   const q = `[out:json][timeout:40];(
 node["place"~"^(suburb|quarter|neighbourhood|town|village|hamlet)$"](around:${r},${city.lat},${city.lon});
@@ -41,7 +53,7 @@ nwr["amenity"~"^(university|hospital)$"](around:${r},${city.lat},${city.lon});
   let data = null;
   for (const url of OVERPASS) {
     try {
-      const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 45000);
+      const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 30000);
       const res = await fetch(url, { method: 'POST', body: 'data=' + encodeURIComponent(q), signal: ctrl.signal,
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
       clearTimeout(to);
