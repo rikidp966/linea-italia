@@ -339,7 +339,47 @@ function aggiungiFermata(l, sid) {
 function nuovaStazione(lat, lon, platform) {
   const sid = nuovoId();
   G.stations[sid] = { id: sid, lat, lon, name: nomeStazione(lat, lon), platform, maturita: 0.3, nata: G.day, pagata: !conCantieri() };
+  nomeDaVia(sid);
   return sid;
+}
+
+// ---------- Nomi delle stazioni dalla via più vicina (OpenStreetMap / Nominatim) ----------
+// Il nome del quartiere arriva subito; appena risponde il servizio lo sostituisce la via o la piazza più vicina.
+// Le stazioni rinominate a mano non vengono mai toccate. Una richiesta al secondo, come chiede Nominatim.
+const nomiDaVie = () => { try { return localStorage.getItem('lineaitalia:nomi') !== 'quartiere'; } catch (e) { return true; } };
+const codaNomi = []; let codaAttiva = false;
+function nomeDaVia(sid) {
+  if (!nomiDaVie() || codaNomi.includes(sid)) return;
+  codaNomi.push(sid);
+  if (!codaAttiva) processaCodaNomi();
+}
+function nomeUnico(n, sid) {
+  const usati = new Set(Object.values(G.stations).filter(s => s.id !== sid).map(s => s.name));
+  if (!usati.has(n)) return n;
+  for (let k = 2; k < 20; k++) if (!usati.has(n + ' ' + k)) return n + ' ' + k;
+  return n;
+}
+async function processaCodaNomi() {
+  codaAttiva = true;
+  while (codaNomi.length) {
+    const sid = codaNomi.shift(); const s = G.stations[sid];
+    if (!s || s.nomeManuale) continue;
+    const lat = s.lat, lon = s.lon;
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=17&addressdetails=1&lat=${lat.toFixed(5)}&lon=${lon.toFixed(5)}`;
+      const d = await (await fetch(url, { headers: { 'Accept-Language': 'it' } })).json();
+      const a = d.address || {};
+      const via = a.square || a.road || a.pedestrian || a.footway || a.cycleway || a.path;
+      const st = G.stations[sid];
+      // se nel frattempo è stata spostata, rinominata o cancellata, la risposta non vale più
+      if (via && st && !st.nomeManuale && st.lat === lat && st.lon === lon) {
+        st.name = nomeUnico(via, sid); st.nomeVia = true;
+        ridisegna(); pannelloCostruisci(); salva();
+      }
+    } catch (e) { /* senza rete resta il nome del quartiere */ }
+    await new Promise(r => setTimeout(r, 1100));
+  }
+  codaAttiva = false;
 }
 
 map.on('click', e => {
@@ -376,7 +416,7 @@ function clickStazione(sid) {
 function rinominaStazione(sid) {
   const s = G.stations[sid]; if (!s) return;
   const n = prompt('Nuovo nome della stazione', s.name);
-  if (n && n.trim()) { s.name = n.trim().slice(0, 40); cambiato(); }
+  if (n && n.trim()) { s.name = n.trim().slice(0, 40); s.nomeManuale = true; cambiato(); }
 }
 
 function inserisciSuTratto(l, latlng) {
@@ -557,6 +597,7 @@ function ridisegna() {
     m.on('dragstart', () => snapshot());
     m.on('dragend', e => {
       const p = e.target.getLatLng(); s.lat = p.lat; s.lon = p.lng; G.sel.station = s.id;
+      if (!s.nomeManuale) nomeDaVia(s.id);
       if (conCantieri()) {
         // la galleria verso una stazione spostata va riprogettata: si recupera quanto speso e si riparte
         for (const k of Object.keys(G.tratte)) if (k.split('|').includes(s.id) && G.tratte[k].giorni > 0) { G.cassa += G.tratte[k].costo; delete G.tratte[k]; }
@@ -690,7 +731,7 @@ function pannelloCostruisci() {
       <li>Continua a toccare per aggiungere fermate in fila.</li>
       <li>Tocca una stazione di un'altra linea per creare un interscambio.</li>
       <li>Tocca un tratto della linea selezionata per inserire una fermata in mezzo; trascina le stazioni per spostarle.</li>
-      <li>Doppio clic su una stazione per rinominarla.</li>
+      <li>Le stazioni prendono il nome della via più vicina; doppio clic per rinominarle.</li>
       <li>Scegli quanti treni far girare: pochi lasciano la gente a terra, troppi fanno salire i costi.</li></ol>
       ${conCantieri() ? `<p>Stai giocando <b>con i cantieri</b>: ogni stazione e ogni galleria costa e richiede giorni di lavori. Hai ${mln(G.cassa)}; ogni giorno arrivano ${mln(finanziamentoGiorno())} di finanziamenti più i ricavi dei biglietti.</p>` : ''}
       <p>Attiva <b>Mappa → Densità</b> per vedere dove vivono (rosso) e dove lavorano (blu) gli abitanti.</p></div>`;
@@ -890,7 +931,7 @@ function collegaCostruisci(l, s) {
     });
   }
   if (s) {
-    $('#sName').onchange = e => { s.name = e.target.value.trim().slice(0, 40) || s.name; cambiato(); };
+    $('#sName').onchange = e => { const n = e.target.value.trim().slice(0, 40); if (n) { s.name = n; s.nomeManuale = true; } cambiato(); };
     $('#sName').onkeydown = e => { if (e.key === 'Enter') e.target.blur(); };
     $('#sRen').onclick = () => { const i = $('#sName'); i.focus(); i.select(); };
     $('#sPlat').onchange = e => {
@@ -1118,6 +1159,11 @@ function pannelloMappa() {
     <label class="check"><input type="radio" name="modo" value="cantieri" ${G.modo === 'cantieri' ? 'checked' : ''}> <b>Con cantieri e budget</b>: costruire costa e richiede giorni di lavori</label>
     <label class="check"><input type="radio" name="modo" value="libero" ${G.modo === 'libero' ? 'checked' : ''}> <b>Libera</b>: costruzione gratis e immediata</label>
     <p class="small muted">Passando ai cantieri, quello che hai già costruito resta e la cassa riparte da ${mln(cassaIniziale())}.</p>
+    <h3>Nomi delle stazioni</h3>
+    <label class="check"><input type="radio" name="nomi" value="via" ${nomiDaVie() ? 'checked' : ''}> Dalla <b>via o piazza</b> più vicina</label>
+    <label class="check"><input type="radio" name="nomi" value="quartiere" ${nomiDaVie() ? '' : 'checked'}> Dal <b>quartiere</b></label>
+    <div class="row"><button id="bNomiVie">Rinomina dalle vie le stazioni esistenti</button></div>
+    <p class="small muted">Le stazioni che hai rinominato tu restano come sono.</p>
     <h3>Partita</h3>
     <div class="row"><button id="bReset" class="danger">Ricomincia ${esc(G.city.nome)}</button></div>` : ''}
     <p class="small muted">La partita si salva da sola in questo browser. Mappe © OpenStreetMap.</p>`;
@@ -1130,6 +1176,21 @@ function pannelloMappa() {
     cambiaModo(m); pannelloMappa();
   });
   document.querySelectorAll('.tema').forEach(b => b.onclick = () => { impostaTema(b.dataset.t); pannelloMappa(); });
+  document.querySelectorAll('input[name=nomi]').forEach(i => i.onchange = e => {
+    try { localStorage.setItem('lineaitalia:nomi', e.target.value); } catch (err) {}
+    pannelloMappa();
+  });
+  const bn = $('#bNomiVie'); if (bn) bn.onclick = () => {
+    const ids = Object.values(G.stations).filter(s => !s.nomeManuale).map(s => s.id);
+    if (!ids.length) return toast('Nessuna stazione da rinominare.');
+    if (nomiDaVie()) {
+      ids.forEach(nomeDaVia);
+      toast(`Cerco le vie di ${ids.length} stazioni: circa ${Math.ceil(ids.length * 1.1)} secondi.`, 3500);
+    } else {
+      for (const sid of ids) { const s = G.stations[sid]; s.name = ''; s.name = nomeStazione(s.lat, s.lon); s.nomeVia = false; }
+      cambiato(); toast('Nomi presi dai quartieri.');
+    }
+  };
   const br = $('#bReset'); if (br) br.onclick = () => {
     if (!confirm(`Cancellare la rete di ${G.city.nome} e ricominciare?`)) return;
     try { localStorage.removeItem(saveKey()); } catch (e) {}
