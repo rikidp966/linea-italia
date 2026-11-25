@@ -263,6 +263,9 @@ function creaPercorso(pz, sv, idx, trains) {
     nPeak, nOff, cap: TIPI[l.type].cap, hwPeak: Math.max(1.5, cycle / nPeak), hwOff: Math.max(1.5, cycle / nOff), sprecati: cycle / nPeak < 1.5 };
 }
 
+// Le diramazioni arrivano al motore come linee "virtuali" con famiglia = id della linea madre
+const famiglia = l => l.famiglia || l.id;
+
 // ---------- Calcolo completo della rete ----------
 function calcolaRete(C, stations, lines, opts = {}) {
   const { routes, pezzi } = costruisciPercorsi(stations, lines, opts);
@@ -281,7 +284,7 @@ function calcolaRete(C, stations, lines, opts = {}) {
     const { r, p, sid } = nodes[v];
     if (p > 0) adj[v].push({ to: v - 1, c: r.hop[p - 1], x: 0 });
     if (p < r.sids.length - 1) adj[v].push({ to: v + 1, c: r.hop[p], x: 0 });
-    for (const u of stNodes[sid]) if (u !== v && nodes[u].r !== r) adj[v].push({ to: u, c: nodes[u].r.line === r.line ? 1 : 4, x: 1 });
+    for (const u of stNodes[sid]) if (u !== v && nodes[u].r !== r) adj[v].push({ to: u, c: famiglia(nodes[u].r.line) === famiglia(r.line) ? 1 : 4, x: 1 });
   }
 
   const res = {
@@ -326,13 +329,16 @@ function calcolaRete(C, stations, lines, opts = {}) {
   if (!S) { res.modi = quoteModali(C, 0); return res; }
 
   // attesa alla banchina: si prende la prima corsa utile della stessa linea che ferma anche alla fermata successiva
+  // (vale anche per le diramazioni: sul tronco comune passano i treni di tutti i rami)
+  const famiglie = {};
+  for (const r of routes) (famiglie[famiglia(r.line)] = famiglie[famiglia(r.line)] || []).push(r);
   const attese = key => {
     const w = new Float64Array(V);
     for (let v = 0; v < V; v++) {
       const { r, p } = nodes[v];
-      const i = r.idx[p], j = p < r.idx.length - 1 ? r.idx[p + 1] : r.idx[p - 1];
+      const si = r.sids[p], sj = p < r.sids.length - 1 ? r.sids[p + 1] : r.sids[p - 1];
       let f = 0;
-      for (const r2 of r.pz.routes) if (r2.idx.includes(i) && r2.idx.includes(j)) f += freq(r2, key);
+      for (const r2 of famiglie[famiglia(r.line)]) if (r2.sids.includes(si) && r2.sids.includes(sj)) f += freq(r2, key);
       w[v] = 30 / Math.max(f, 0.01);
     }
     return w;
