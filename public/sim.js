@@ -103,10 +103,19 @@ function costruisciCitta(city, osm) {
     }
     let a = 0;
     for (const p of attr) { const d = distKm(z, p); if (d < 2) a += p.w * Math.exp(-d * d / 0.5); }
-    if (places.length) { z.pop = land * (0.35 + core); z.jobs = land * (0.12 + 2 * Math.pow(core, 1.6)); }
-    else { z.pop = core * (0.7 + 0.6 * rnd()); z.jobs = Math.pow(core, 1.6) * (0.7 + 0.6 * rnd()); }
+    // due modelli: dai quartieri mappati (L) e "centro più periferie" (C)
+    z.popL = land * (0.35 + core); z.jobsL = land * (0.12 + 2 * Math.pow(core, 1.6));
+    z.popC = core * (0.7 + 0.6 * rnd()); z.jobsC = Math.pow(core, 1.6) * (0.7 + 0.6 * rnd());
     z.attr = a;
     raw.push(z);
+  }
+  // con pochi quartieri mappati (città piccole) il secondo modello pesa di più: niente quartieri = solo quello
+  const peso = Math.min(1, places.length / 15);
+  const somma = k => raw.reduce((s, z) => s + z[k], 0) || 1;
+  const sPL = somma('popL'), sJL = somma('jobsL'), sPC = somma('popC'), sJC = somma('jobsC');
+  for (const z of raw) {
+    z.pop = peso * z.popL / sPL + (1 - peso) * z.popC / sPC;
+    z.jobs = peso * z.jobsL / sJL + (1 - peso) * z.jobsC / sJC;
   }
   const maxPop = Math.max(...raw.map(z => z.pop + z.jobs));
   const zones = raw.filter(z => z.pop + z.jobs > maxPop * 0.004);

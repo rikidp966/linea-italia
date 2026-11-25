@@ -56,7 +56,9 @@ async function prova(url, q) {
 }
 
 (async () => {
-  const todo = ctx.CITTA.filter(c => !fs.existsSync(path.join(OUT, c.id + '.json')));
+  // node tools/scarica-osm.js andria bari   -> scarica solo quelle città
+  const scelte = process.argv.slice(2);
+  const todo = ctx.CITTA.filter(c => !fs.existsSync(path.join(OUT, c.id + '.json')) && (!scelte.length || scelte.includes(c.id)));
   console.log(`Da scaricare: ${todo.length} di ${ctx.CITTA.length}`);
   for (const c of todo) {
     let ok = false;
