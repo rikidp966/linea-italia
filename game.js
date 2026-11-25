@@ -154,7 +154,7 @@ async function avviaCitta(city) {
 // ---------- Cantieri e budget ----------
 function tratteRichieste() {
   const m = new Map();
-  for (const l of G.lines) for (let k = 0; k < l.stops.length - 1; k++) m.set(chiaveTratta(l.stops[k], l.stops[k + 1]), [l.stops[k], l.stops[k + 1]]);
+  for (const l of G.lines) for (const seq of sequenze(l)) for (let k = 0; k < seq.length - 1; k++) m.set(chiaveTratta(seq[k], seq[k + 1]), [seq[k], seq[k + 1]]);
   return m;
 }
 function preventivo() {
@@ -278,7 +278,41 @@ function cambiaModo(m) {
 // ---------- Modifica della rete ----------
 function nuovoId(p = 's') { return p + (G.nextId++); }
 function linea(id) { return G.lines.find(l => l.id === id); }
-function lineeDi(sid) { return G.lines.filter(l => l.stops.includes(sid)); }
+// Le fermate di una linea: il tronco più una sequenza per ogni diramazione (che parte dalla stazione di innesto)
+function sequenze(l) { return [l.stops, ...(l.rami || []).map(r => [r.da, ...r.stops])]; }
+function fermateLinea(l) { return new Set(sequenze(l).flat()); }
+function ramo(l, id) { return (l?.rami || []).find(r => r.id === id); }
+function lineeDi(sid) { return G.lines.filter(l => fermateLinea(l).has(sid)); }
+// Per il motore ogni diramazione è una linea "virtuale": dal capolinea scelto lungo il tronco fino all'innesto, poi sul ramo
+function lineaRamo(l, r) {
+  const j = l.stops.indexOf(r.da); if (j < 0 || !r.stops.length) return null;
+  const tronco = r.verso === 'start' ? l.stops.slice(0, j + 1) : l.stops.slice(j).reverse();
+  return { id: l.id + '~' + r.id, famiglia: l.id, name: l.name, color: l.color, type: l.type, offpeak: l.offpeak, trains: r.trains, stops: [...tronco, ...r.stops], services: [] };
+}
+function lineeSim() {
+  const out = [];
+  for (const l of G.lines) { out.push(l); for (const r of l.rami || []) { const v = lineaRamo(l, r); if (v) out.push(v); } }
+  return out;
+}
+// toglie diramazioni rimaste senza innesto o senza fermate, e le stazioni non più usate da nessuna linea
+function pulisciRami() {
+  for (const l of G.lines) l.rami = (l.rami || []).filter(r => l.stops.includes(r.da) && r.stops.length);
+  G.lines = G.lines.filter(l => l.stops.length);
+  const usate = new Set(G.lines.flatMap(l => [...fermateLinea(l)]));
+  for (const sid of Object.keys(G.stations)) if (!usate.has(sid)) delete G.stations[sid];
+  if (!linea(G.sel.line)) { G.sel.line = null; G.sel.ramo = null; }
+  if (G.sel.ramo && !ramo(linea(G.sel.line), G.sel.ramo)) G.sel.ramo = null;
+  if (!G.stations[G.sel.station]) G.sel.station = null;
+}
+function creaRamo(l, sid) {
+  const j = l.stops.indexOf(sid); if (j <= 0 || j >= l.stops.length - 1) return;
+  snapshot();
+  const r = { id: nuovoId('r'), da: sid, stops: [], verso: j >= l.stops.length - 1 - j ? 'start' : 'end', trains: 4 };
+  l.rami = l.rami || []; l.rami.push(r);
+  G.sel.ramo = r.id; G.sel.station = sid;
+  ridisegna(); pannelloCostruisci();
+  toast(`Diramazione da ${esc(G.stations[sid].name)}: tocca la mappa per tracciarla.`, 3500);
+}
 
 function nomeStazione(lat, lon) {
   const usati = new Set(Object.values(G.stations).map(s => s.name));
@@ -314,16 +348,23 @@ map.on('click', e => {
   let l = linea(G.sel.line);
   if (!l) l = creaLinea();
   const sid = nuovaStazione(e.latlng.lat, e.latlng.lng, l.type === 'leggera' ? 'raso' : 'sotterranea');
-  aggiungiFermata(l, sid);
+  const r = ramo(l, G.sel.ramo);
+  if (r) r.stops.push(sid); else aggiungiFermata(l, sid);
   G.sel.station = sid;
   cambiato();
 });
 
 function clickStazione(sid) {
   const l = linea(G.sel.line);
-  if (l && !l.stops.includes(sid) && G.sel.station !== sid) {
+  const r = ramo(l, G.sel.ramo);
+  if (r && sid !== r.da && !r.stops.includes(sid) && !l.stops.includes(sid) && G.sel.station !== sid) {
+    snapshot(); r.stops.push(sid); G.sel.station = sid; cambiato(); return;
+  }
+  if (!r && l && !fermateLinea(l).has(sid) && G.sel.station !== sid) {
     snapshot(); aggiungiFermata(l, sid); G.sel.station = sid; cambiato(); return;
   }
+  // toccando l'ultima fermata di una diramazione la si riprende per allungarla
+  if (l && !r) { const rr = (l.rami || []).find(x => x.stops[x.stops.length - 1] === sid); if (rr) { G.sel.ramo = rr.id; G.sel.station = sid; ridisegna(); pannelloCostruisci(); return; } }
   if (l && l.stops.length > 1) {
     if (l.stops[0] === sid) G.sel.end = 'start';
     else if (l.stops[l.stops.length - 1] === sid) G.sel.end = 'end';
@@ -339,49 +380,58 @@ function rinominaStazione(sid) {
 }
 
 function inserisciSuTratto(l, latlng) {
+  // cerca il tratto più vicino sul tronco o sulle diramazioni
   const p = map.latLngToLayerPoint(latlng);
-  let best = -1, bd = Infinity;
-  for (let k = 0; k < l.stops.length - 1; k++) {
-    const a = G.stations[l.stops[k]], b = G.stations[l.stops[k + 1]];
-    const d = L.LineUtil.pointToSegmentDistance(p, map.latLngToLayerPoint([a.lat, a.lon]), map.latLngToLayerPoint([b.lat, b.lon]));
-    if (d < bd) { bd = d; best = k; }
-  }
-  if (best < 0) return;
+  let best = null, bd = Infinity;
+  sequenze(l).forEach((seq, si) => {
+    for (let k = 0; k < seq.length - 1; k++) {
+      const a = G.stations[seq[k]], b = G.stations[seq[k + 1]];
+      const d = L.LineUtil.pointToSegmentDistance(p, map.latLngToLayerPoint([a.lat, a.lon]), map.latLngToLayerPoint([b.lat, b.lon]));
+      if (d < bd) { bd = d; best = { si, k, a: seq[k], b: seq[k + 1] }; }
+    }
+  });
+  if (!best) return;
   snapshot();
-  const a = l.stops[best], b = l.stops[best + 1];
+  const { a, b } = best;
   const sid = nuovaStazione(latlng.lat, latlng.lng, G.stations[a].platform);
   // se la galleria esiste già, i due nuovi tratti la riusano: si paga solo la stazione
   const vecchia = G.tratte[chiaveTratta(a, b)];
-  const usanoTratta = G.lines.filter(x => x.stops.some((sid, k) => k && chiaveTratta(x.stops[k - 1], sid) === chiaveTratta(a, b))).length;
+  const usanoTratta = G.lines.flatMap(sequenze).filter(seq => seq.some((s, k) => k && chiaveTratta(seq[k - 1], s) === chiaveTratta(a, b))).length;
   if (conCantieri() && vecchia && usanoTratta === 1) {
     G.tratte[chiaveTratta(a, sid)] = { ...vecchia, costo: vecchia.costo / 2 };
     G.tratte[chiaveTratta(sid, b)] = { ...vecchia, costo: vecchia.costo / 2 };
   }
-  l.stops.splice(best + 1, 0, sid);
+  if (best.si === 0) l.stops.splice(best.k + 1, 0, sid);
+  else l.rami[best.si - 1].stops.splice(best.k, 0, sid); // nella sequenza del ramo la posizione 0 è l'innesto
   G.sel.station = sid;
   cambiato();
 }
 function rimuoviDaLinea(l, sid) {
   snapshot();
   l.stops = l.stops.filter(s => s !== sid);
-  if (!lineeDi(sid).length) delete G.stations[sid];
-  if (!l.stops.length) { G.lines = G.lines.filter(x => x !== l); G.sel.line = null; }
-  if (G.sel.station === sid) G.sel.station = null;
+  for (const r of l.rami || []) r.stops = r.stops.filter(s => s !== sid);
+  pulisciRami();
   cambiato();
 }
 function eliminaStazione(sid) {
   snapshot();
-  for (const l of lineeDi(sid)) l.stops = l.stops.filter(s => s !== sid);
-  G.lines = G.lines.filter(l => l.stops.length);
-  if (!linea(G.sel.line)) G.sel.line = null;
-  delete G.stations[sid]; G.sel.station = null;
+  for (const l of G.lines) { l.stops = l.stops.filter(s => s !== sid); for (const r of l.rami || []) r.stops = r.stops.filter(s => s !== sid); }
+  delete G.stations[sid];
+  pulisciRami();
   cambiato();
 }
 function eliminaLinea(l) {
   snapshot();
   G.lines = G.lines.filter(x => x !== l);
-  for (const sid of l.stops) if (!lineeDi(sid).length) delete G.stations[sid];
-  G.sel.line = null; if (!G.stations[G.sel.station]) G.sel.station = null;
+  G.sel.line = null; G.sel.ramo = null;
+  pulisciRami();
+  cambiato();
+}
+function eliminaRamo(l, r) {
+  snapshot();
+  l.rami = l.rami.filter(x => x !== r);
+  if (G.sel.ramo === r.id) G.sel.ramo = null;
+  pulisciRami();
   cambiato();
 }
 
@@ -402,9 +452,21 @@ function ricalcola() {
   for (const l of G.lines) if (l.autoTreni !== false && l.stops.length > 1) {
     const lp = parametriLinea(l, G.stations); l.trains = Math.max(2, Math.ceil(lp.cycle / 5));
   }
-  G.res = calcolaRete(G.C, G.stations, G.lines, {
+  // diramazioni: in automatico un treno ogni ~10 minuti, così sul tronco comune si sommano ai treni della linea
+  for (const l of G.lines) for (const r of l.rami || []) if (r.autoTreni !== false) {
+    const v = lineaRamo(l, r); if (v) r.trains = Math.max(2, Math.ceil(parametriLinea(v, G.stations).cycle / 10));
+  }
+  G.res = calcolaRete(G.C, G.stations, lineeSim(), {
     tariffe: G.tariffe, centro: G.city, stazioneAperta, trattaAperta,
   });
+  // i risultati delle diramazioni si sommano alla linea madre
+  G.res.rami = {};
+  for (const l of G.lines) for (const r of l.rami || []) {
+    const v = G.res.linee[l.id + '~' + r.id], m = G.res.linee[l.id]; if (!v || !m) continue;
+    G.res.rami[r.id] = { ...v, LP: G.res.LP[l.id + '~' + r.id] };
+    m.saliti += v.saliti; m.ricavi += v.ricavi; m.costo += v.costo; m.aperta = m.aperta || v.aperta;
+    m.maxRatio = Math.max(m.maxRatio, v.maxRatio); m.maxRatioOff = Math.max(m.maxRatioOff, v.maxRatioOff); m.saturo = m.saturo || v.saturo;
+  }
   aggiornaKpi(); ridisegna(); pannelloCostruisci(); controllaSfide();
   if (G.tab === 'statistiche') pannelloStatistiche();
   if (G.tab === 'tariffe') risultatiTariffe();
@@ -450,32 +512,38 @@ function ridisegna() {
   layerLines.clearLayers(); layerSt.clearLayers();
   const selL = G.sel.line;
   for (const l of G.lines) {
-    const pts = l.stops.map(id => [G.stations[id].lat, G.stations[id].lon]);
-    if (pts.length < 2) continue;
     const isSel = l.id === selL;
     const r = G.res?.linee[l.id];
     const crowd = r ? Math.max(r.maxRatio, r.maxRatioOff) : 0;
-    L.polyline(pts, { color: '#fff', weight: isSel ? 13 : 10, opacity: 0.9, interactive: false }).addTo(layerLines);
-    const pl = L.polyline(pts, { color: l.color, weight: isSel ? 8 : 6, opacity: selL && !isSel ? 0.45 : 1, bubblingMouseEvents: false, lineCap: 'round', lineJoin: 'round', className: crowd > 1 ? 'overload' : '' }).addTo(layerLines);
-    pl.on('click', e => {
-      L.DomEvent.stop(e);
-      if (G.sel.line === l.id) inserisciSuTratto(l, e.latlng);
-      else { G.sel.line = l.id; G.sel.station = null; ridisegna(); pannelloCostruisci(); vaiTab('costruisci'); toast(`Linea ${esc(l.name)} selezionata. Tocca un tratto per inserire una fermata, o la mappa per allungarla.`); }
+    sequenze(l).forEach((seq, si) => {
+      const pts = seq.map(id => [G.stations[id].lat, G.stations[id].lon]);
+      if (pts.length < 2) return;
+      const ramoId = si ? l.rami[si - 1].id : null;
+      const ramoSel = isSel && G.sel.ramo && G.sel.ramo === ramoId;
+      L.polyline(pts, { color: '#fff', weight: isSel ? 13 : 10, opacity: 0.9, interactive: false }).addTo(layerLines);
+      const pl = L.polyline(pts, { color: l.color, weight: ramoSel ? 10 : isSel ? 8 : 6, opacity: selL && !isSel ? 0.45 : 1, bubblingMouseEvents: false, lineCap: 'round', lineJoin: 'round', className: crowd > 1 ? 'overload' : '' }).addTo(layerLines);
+      pl.on('click', e => {
+        L.DomEvent.stop(e);
+        if (G.sel.line === l.id) inserisciSuTratto(l, e.latlng);
+        else { G.sel.line = l.id; G.sel.ramo = null; G.sel.station = null; ridisegna(); pannelloCostruisci(); vaiTab('costruisci'); toast(`Linea ${esc(l.name)} selezionata. Tocca un tratto per inserire una fermata, o la mappa per allungarla.`); }
+      });
+      // tratti ancora in cantiere: tratteggio bianco sopra la linea
+      if (conCantieri()) for (let k = 0; k < seq.length - 1; k++) {
+        if (trattaAperta(seq[k], seq[k + 1])) continue;
+        L.polyline([pts[k], pts[k + 1]], { color: '#fff', weight: isSel ? 5 : 3.5, dashArray: '6 8', interactive: false, opacity: 0.95 }).addTo(layerLines);
+      }
     });
-    // tratti ancora in cantiere: tratteggio bianco sopra la linea
-    if (conCantieri()) for (let k = 0; k < l.stops.length - 1; k++) {
-      if (trattaAperta(l.stops[k], l.stops[k + 1])) continue;
-      L.polyline([pts[k], pts[k + 1]], { color: '#fff', weight: isSel ? 5 : 3.5, dashArray: '6 8', interactive: false, opacity: 0.95 }).addTo(layerLines);
-    }
   }
   const l = linea(G.sel.line);
+  const rs = ramo(l, G.sel.ramo);
   for (const s of Object.values(G.stations)) {
     const ls = lineeDi(s.id);
     const inter = ls.length > 1;
     const ing = G.res?.stazioni[s.id]?.ingressi || 0;
     const d = Math.round((inter ? 16 : 12) + Math.min(12, Math.sqrt(ing) / 12));
     const isSel = s.id === G.sel.station;
-    const isEnd = l && l.stops.length > 1 && ((G.sel.end === 'end' && l.stops[l.stops.length - 1] === s.id) || (G.sel.end === 'start' && l.stops[0] === s.id));
+    const isEnd = rs ? (rs.stops.length ? rs.stops[rs.stops.length - 1] : rs.da) === s.id
+      : l && l.stops.length > 1 && ((G.sel.end === 'end' && l.stops[l.stops.length - 1] === s.id) || (G.sel.end === 'start' && l.stops[0] === s.id));
     const html = `<div class="st ${inter ? 'inter' : ''} ${isSel ? 'sel' : ''} ${isEnd ? 'end' : ''} ${s.cantiere ? 'cant' : ''} p-${s.platform}" style="--c:${ls[0]?.color || '#333'}"></div>`;
     const spostabile = !conCantieri() || (s.cantiere && !trattaCostruita(s.id));
     const m = L.marker([s.lat, s.lon], {
@@ -630,10 +698,10 @@ function pannelloCostruisci() {
   h += '<div class="lines">';
   for (const x of G.lines) {
     const r = G.res?.linee[x.id];
-    const cant = conCantieri() && x.stops.some((sid, k) => G.stations[sid]?.cantiere || (k && !trattaAperta(x.stops[k - 1], sid)));
+    const cant = conCantieri() && sequenze(x).some(q => q.some((sid, k) => G.stations[sid]?.cantiere || (k && !trattaAperta(q[k - 1], sid))));
     h += `<button class="lineRow ${x.id === G.sel.line ? 'on' : ''}" data-l="${x.id}">
       <span class="bullet" style="background:${x.color}">${esc(x.name)}</span>
-      <span class="grow"><b>${x.stops.length} fermate${x.services?.length ? ` · ${x.services.length} corse extra` : ''}</b><small>${TIPI[x.type].nome}${r?.aperta ? ' · ' + fmtK(r.saliti) + ' saliti' : ''}${cant ? ' · 🚧 lavori in corso' : ''}</small></span>
+      <span class="grow"><b>${fermateLinea(x).size} fermate${x.rami?.length ? ` · ${x.rami.length + 1} rami` : ''}${x.services?.length ? ` · ${x.services.length} corse extra` : ''}</b><small>${TIPI[x.type].nome}${r?.aperta ? ' · ' + fmtK(r.saliti) + ' saliti' : ''}${cant ? ' · 🚧 lavori in corso' : ''}</small></span>
       ${r && Math.max(r.maxRatio, r.maxRatioOff) > 1 ? '<span class="warn" title="Treni sovraffollati">!</span>' : ''}</button>`;
   }
   h += `</div><div class="row"><button id="bNew" class="primary">+ Nuova linea</button>
@@ -683,8 +751,32 @@ function schedaLinea(l) {
     for (const sv of l.services) h += schedaServizio(l, sv);
     h += `<div class="row"><button id="svExp">+ Espressa</button><button id="svLim">+ Limitata</button></div>`;
   }
+  // diramazioni
+  h += `<h4>Diramazioni</h4>`;
+  if (!(l.rami || []).length) h += `<p class="small muted">Una linea può dividersi in due rami, come una Y. Seleziona una stazione in mezzo alla linea e premi <b>Crea diramazione da qui</b>, poi tocca la mappa per tracciare il nuovo ramo.</p>`;
+  for (const r of l.rami || []) h += schedaRamo(l, r);
   h += `<div class="row"><button id="lDel" class="danger">Elimina linea</button></div></div>`;
   return h;
+}
+
+function schedaRamo(l, r) {
+  const j = l.stops.indexOf(r.da); const rr = G.res?.rami?.[r.id];
+  const fine = r.stops.length ? G.stations[r.stops[r.stops.length - 1]].name : '…';
+  const capoA = G.stations[l.stops[0]].name, capoB = G.stations[l.stops[l.stops.length - 1]].name;
+  const sel = G.sel.ramo === r.id;
+  return `<div class="svc ramo ${sel ? 'on' : ''}" data-ramo="${r.id}">
+    <div class="svcHead"><span class="tag" style="--c:${l.color};background:${l.color}">Ramo</span>
+      <span class="grow small"><b>${esc(G.stations[r.da].name)} → ${esc(fine)}</b> · ${r.stops.length} fermate${rr?.saliti ? ` · ${fmtK(rr.saliti)} saliti` : ''}</span>
+      <button class="link rDel">Elimina</button></div>
+    ${sel ? `<p class="small"><b>Stai allungando questo ramo:</b> tocca la mappa o una stazione.</p>` : `<button class="link rSel">Allunga questo ramo</button>`}
+    <label>I treni del ramo proseguono sul tronco fino a<select class="rVerso">
+      <option value="start" ${r.verso === 'start' ? 'selected' : ''}>${esc(capoA)}</option>
+      <option value="end" ${r.verso === 'end' ? 'selected' : ''}>${esc(capoB)}</option></select></label>
+    <label>Treni sul ramo<span class="stepper sm"><button class="rMinus">−</button><b>${r.trains}</b><button class="rPlus">+</button>
+      ${r.autoTreni === false ? '<button class="link rAuto">automatico</button>' : '<small>automatico: ogni ~10 min</small>'}</span></label>
+    ${rr?.LP ? `<p class="small muted">Un treno del ramo ogni ${rr.LP.hwPeak.toFixed(1)} min in punta. Sul tronco tra ${esc(r.verso === 'start' ? capoA : capoB)} e ${esc(G.stations[r.da].name)} passano sia i treni della linea sia quelli del ramo.</p>` : ''}
+    ${j < 0 ? '<p class="small bad">La stazione di innesto non è più sulla linea.</p>' : ''}
+  </div>`;
 }
 
 function schedaServizio(l, sv) {
@@ -729,7 +821,10 @@ function schedaStazione(s, l) {
   if (conCantieri() && s.pagata && !s.cantiere) h += '<p class="small muted">Cambiare tipo a una stazione finita vuol dire ricostruirla: si paga di nuovo e chiude per i lavori.</p>';
   if (r) h += `<div class="facts"><div><small>Ingressi/giorno</small><b>${fmtK(r.ingressi)}</b></div><div><small>Trasbordi/giorno</small><b>${fmtK(r.trasbordi)}</b></div>
     <div><small>Abitudine</small><b>${pct(s.maturita ?? 1)}</b><small>cresce ogni giorno</small></div></div>`;
-  h += `<div class="row">${l && l.stops.includes(s.id) && ls.length > 1 ? `<button id="sOut">Togli da ${esc(l.name)}</button>` : ''}<button id="sDel" class="danger">Elimina stazione</button></div>`;
+  const j = l ? l.stops.indexOf(s.id) : -1;
+  if (l && j > 0 && j < l.stops.length - 1 && !G.sel.ramo) h += `<div class="row"><button id="sRamo" class="primary">⑂ Crea diramazione da qui</button></div>`;
+  h += `<div class="row">${l && fermateLinea(l).has(s.id) && (ls.length > 1 || sequenze(l).some((q, i) => i && q.includes(s.id) && q[0] !== s.id)) ? `<button id="sOut">Togli da ${esc(l.name)}</button>` : ''}<button id="sDel" class="danger">Elimina stazione</button></div>`;
+  if ((l?.rami || []).some(r => r.da === s.id)) h += '<p class="small muted">Da qui parte una diramazione: eliminando la stazione si elimina anche il ramo.</p>';
   if (conCantieri()) h += '<p class="small muted">Demolire non restituisce i soldi spesi (ma «Annulla» sì, finché non passa la giornata).</p>';
   return h + '</div>';
 }
@@ -737,13 +832,23 @@ function schedaStazione(s, l) {
 function collegaCostruisci(l, s) {
   const el = $('#tab-costruisci');
   el.querySelectorAll('.lineRow').forEach(b => b.onclick = () => {
-    G.sel.line = b.dataset.l === G.sel.line ? null : b.dataset.l; G.sel.station = null; G.sel.end = 'end';
+    G.sel.line = b.dataset.l === G.sel.line ? null : b.dataset.l; G.sel.station = null; G.sel.end = 'end'; G.sel.ramo = null;
     const x = linea(G.sel.line);
     if (x && x.stops.length > 1) map.fitBounds(L.latLngBounds(x.stops.map(id => [G.stations[id].lat, G.stations[id].lon])), { padding: [60, 60], maxZoom: 14 });
     ridisegna(); pannelloCostruisci();
   });
   $('#bNew').onclick = () => { snapshot(); creaLinea(); G.sel.station = null; ridisegna(); pannelloCostruisci(); toast('Nuova linea: tocca la mappa o una stazione esistente per iniziarla.'); };
-  $('#bDesel').onclick = () => { G.sel.line = null; G.sel.station = null; ridisegna(); pannelloCostruisci(); };
+  $('#bDesel').onclick = () => { G.sel.line = null; G.sel.station = null; G.sel.ramo = null; ridisegna(); pannelloCostruisci(); };
+  el.querySelectorAll('.ramo').forEach(box => {
+    const r = ramo(l, box.dataset.ramo); if (!r) return;
+    box.querySelector('.rDel').onclick = () => { if (confirm('Eliminare questa diramazione e le sue fermate?')) eliminaRamo(l, r); };
+    const rs = box.querySelector('.rSel'); if (rs) rs.onclick = () => { G.sel.ramo = r.id; G.sel.station = r.stops[r.stops.length - 1] || r.da; ridisegna(); pannelloCostruisci(); };
+    box.querySelector('.rVerso').onchange = e => { snapshot(); r.verso = e.target.value; cambiato(); };
+    box.querySelector('.rMinus').onclick = () => { if (r.trains > 1) { r.autoTreni = false; r.trains--; cambiato(); } };
+    box.querySelector('.rPlus').onclick = () => { if (r.trains < 60) { r.autoTreni = false; r.trains++; cambiato(); } };
+    const ra = box.querySelector('.rAuto'); if (ra) ra.onclick = () => { r.autoTreni = true; cambiato(); };
+  });
+  const sr = $('#sRamo'); if (sr) sr.onclick = () => creaRamo(l, s.id);
   $('#bUndo').onclick = annulla;
   if (l) {
     $('#lName').onchange = e => { l.name = e.target.value.trim() || l.name; cambiato(); };
@@ -918,8 +1023,10 @@ function pannelloStatistiche() {
   if (!r || !G.C) { el.innerHTML = '<p class="muted">Nessun dato.</p>'; return; }
   let kmTot = 0, costoCostr = 0;
   for (const l of G.lines) {
-    const lp = parametriLinea(l, G.stations); kmTot += lp.km;
-    lp.segKm.forEach((km, k) => { costoCostr += km * PIANI[pianoTratta(G.stations[l.stops[k]], G.stations[l.stops[k + 1]])].costoKm; });
+    for (const seq of sequenze(l)) for (let k = 0; k < seq.length - 1; k++) {
+      const a = G.stations[seq[k]], b = G.stations[seq[k + 1]]; const km = distKm(a, b) * 1.12;
+      kmTot += km; costoCostr += km * PIANI[pianoTratta(a, b)].costoKm;
+    }
   }
   for (const s of Object.values(G.stations)) costoCostr += CANTIERE[s.platform].stazione;
   const modi = Object.entries(r.modi).sort((a, b) => b[1] - a[1]);
@@ -1053,7 +1160,7 @@ $('#panelToggle').onclick = () => $('#panel').classList.toggle('chiuso');
 document.addEventListener('keydown', e => {
   if (e.target.matches('input,select,textarea')) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); annulla(); }
-  else if (e.key === 'Escape') { G.sel.line = null; G.sel.station = null; ridisegna(); pannelloCostruisci(); }
+  else if (e.key === 'Escape') { if (G.sel.ramo) G.sel.ramo = null; else { G.sel.line = null; G.sel.station = null; } ridisegna(); pannelloCostruisci(); }
   else if (e.key === 'Delete' && G.sel.station) eliminaStazione(G.sel.station);
   else if (e.key === 'F2' && G.sel.station) { e.preventDefault(); rinominaStazione(G.sel.station); }
   else if (e.key === ' ') { e.preventDefault(); G.speed = G.speed ? 0 : 1; aggiornaVelocita(); }
